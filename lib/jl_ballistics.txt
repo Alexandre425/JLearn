@@ -1,0 +1,76 @@
+--@name JLearn ACF Ballistics Library
+--@author Jagger
+--@shared
+
+local delta_t = 0.015
+local gravity = Vector(0,0,-600)
+
+local BData = class("matrix")
+do
+    -- Creates a new bullet data object
+    function BData:initialize(ent)
+        self.muzzle_vel = ent and ent:acfMuzzleVel() * 39.37 or 0
+        self.drag_coef = ent and ent:acfDragCoef() or 0
+        return self
+    end
+    
+    -- Converts the bullet data to a table
+    function BData:toTable()
+        local tab = {}
+        tab.muzzle_vel = self.muzzle_vel
+        tab.drag_coef = self.drag_coef
+        return tab
+    end
+    
+    -- Creates a BData object from a table
+    -- Table is trusted, so should only be used with toTable
+    function BData:fromTable(tab)
+        local bdata = BData:new()
+        bdata.muzzle_vel = tab.muzzle_vel
+        bdata.drag_coef = tab.drag_coef
+        return bdata
+    end
+    
+    -- Prints a bullet data object
+    function BData:print()
+        local str = ""
+        str = str .. string.format("Muzzle velocity:  %.1f\n", self.muzzle_vel)
+        str = str .. string.format("Drag coefficient: %.3e\n", self.drag_coef)
+        print(str)
+    end
+    
+    -- Simulates a direct fire by calculating the bullet's flight and saving equally spaced points
+    -- ang - angle (pitch) at which the bullet is shot
+    -- time - time to stop the solve
+    -- points - number of points to save (equally spaced between 0 and time)
+    function BData:SimDirectFire(ang, time, points)
+        local pos = Vector(0,0,0)
+        local cur_time = 0
+        local vel = Vector(math.cos(math.rad(ang)), 0, math.sin(math.rad(ang))):getNormalized() * self.muzzle_vel
+        local save_inc = time / points
+        local next_save = 0
+        local ret = {}
+        local i = 1
+        
+        while cur_time < time do
+            local vel_len = vel:getLength()
+            local drag = vel * vel_len * self.drag_coef
+            
+            pos = pos + vel * delta_t
+            vel = vel + (gravity - drag)*delta_t
+            
+            cur_time = cur_time + delta_t
+            if cur_time > next_save then
+                next_save = next_save + save_inc
+                ret[i] = {pos, cur_time}
+                i = i+1
+            end
+            
+        end
+        
+        return ret
+    end
+    
+end
+
+return BData

@@ -1,0 +1,256 @@
+--@name JLearn Matrix Library
+--@author Jagger
+--@shared
+
+-- Calculates the dot product between two tables
+local function tableDot(tab1, tab2)
+    local sum = 0
+    for i, v in ipairs(tab1) do 
+        sum = sum + (tab1[i] or 0) * (tab2[i] or 0)
+    end
+    return sum
+end
+
+-- Adds the values in two tables one by one
+local function tableAdd (tab1, tab2)
+    local res = {}
+    for i, v in ipairs(tab1) do 
+        res[i] = v + tab2[i]
+    end
+    return res
+end
+
+-- Multiplies a table by a coefficient
+local function tableMult (tab, coef)
+    local res = {}
+    for i, v in ipairs(tab) do 
+        res[i] = v * coef
+    end
+    return res
+end
+
+local Matrix = class("matrix")
+do
+    -- Matrix constructor
+    function Matrix:initialize(n, m)
+        self.lines = n
+        self.cols = m
+        self.count = m*n
+        
+        for i = 1, self.lines, 1 do
+            self[i] = {}
+        end
+        return self
+    end
+    
+    -- Copies a table
+    function Matrix:copy()
+        local mat = Matrix:new(self.lines, self.cols)
+        
+        for i = 1, self.lines, 1 do
+            mat[i] = table.copy(self[i])
+        end
+        return mat
+    end
+    
+    -- Reads a table and makes a matrix from it
+    function Matrix:fromTable(tab)
+        local mat = nil
+        if type(tab[1]) == "table" then         -- If two-dimensional
+            local lines = table.count(tab)
+            local cols = table.count(tab[1])
+            mat = Matrix:new(lines, cols)
+            for n,l in ipairs(tab) do
+                for m,v in ipairs(l) do
+                    mat[n][m] = v
+                end
+            end
+        else                                    -- If one-dimensional (make a single line)
+            local lines = 1
+            local cols = table.count(tab)
+            mat = Matrix:new(lines, cols)
+            for c,v in ipairs(tab) do
+                mat[1][c] = v
+            end
+        end
+        
+        return mat
+    end    
+    
+    -- Converts the matrix to a table
+    function Matrix:toTable()
+        local tab = {}
+        for i = 1, self.lines, 1 do
+            tab[i] = self[i]
+        end
+        return tab
+    end
+    
+    -- Finds the maximum value of a matrix
+    function Matrix:max()
+        local max = -1e999
+        for i = 1, self.lines, 1 do
+            for j = 1, self.cols, 1 do
+                max = math.max(max, self[i][j])
+            end
+        end
+        return max
+    end
+    
+    -- Finds the minimum value of a matrix
+    function Matrix:min()
+        local min = 1e999
+        for i = 1, self.lines, 1 do
+            for j = 1, self.cols, 1 do
+                min = math.min(min, self[i][j])
+            end
+        end
+        return min
+    end
+    
+    function Matrix:print(precision)
+        -- Find the largest absolute number
+        local max = math.max(math.abs(self:max()), math.abs(self:min()))
+        local length = math.floor(math.log10(max)) + 5 + (precision or 3)
+        -- Print the column numbering
+        local col_format = "%" .. string.format("%dd | ", length)
+        local col_str = {"   | "}
+        for i = 1, self.cols, 1 do
+            col_str[i+1] = string.format(col_format, i)
+        end
+        print(table.concat(col_str))
+        local format = "%" .. string.format("%d.%df | ", length, precision or 3)
+        for i = 1, self.lines, 1 do
+            -- Print the line numbering
+            local str = {string.format("%2d | ", i)}
+            for j = 1, self.cols, 1 do
+                str[j+1] = string.format(format, self[i][j])
+            end
+            print(table.concat(str))
+        end
+        print("\n")
+    end
+    
+    -- Fills the matrix with zeroes
+    function Matrix:zero()
+        for i = 1, self.lines, 1 do
+            for j = 1, self.cols, 1 do
+                self[i][j] = 0
+            end
+        end
+        return self
+    end
+    
+    -- Fills the matrix with random numbers
+    function Matrix:random(min, max)
+        for i = 1, self.lines, 1 do
+            for j = 1, self.cols, 1 do
+                self[i][j] = math.rand(min, max)
+            end
+        end
+        return self
+    end
+    
+    -- Creates an identity matrix
+    function Matrix:identity(dim)
+        local mat = Matrix:initialize(dim, dim)
+        mat:zero()
+        for i = 1, dim, 1 do
+            mat[i][i] = 1
+        end
+        return mat
+    end
+    
+    -- Returns the line
+    function Matrix:line(i)
+        local line = table.copy(self[i])
+        return line
+    end
+    
+    -- Returns the column
+    function Matrix:col(j)
+        local col = {}
+        for i = 1, self.lines, 1 do
+            col[i] = self[i][j] or 0
+        end
+        return col
+    end
+    
+    -- Returns the transpose of a matrix
+    function Matrix:transpose()
+        local mat = Matrix:new(self.cols, self.lines)
+        for i = 1, self.cols, 1 do
+            mat[i] = self:col(i)
+        end
+        return mat
+    end
+    
+    -- Adds two matrices
+    function Matrix:add(mat)
+        -- Checks if the sizes match
+        if self.lines ~= mat.lines or self.cols ~= mat.cols then
+            error("Attempted to add different size matrices!")
+            return 0
+        end
+        
+        local res = Matrix:new(self.lines, self.cols)
+        for i = 1, self.lines, 1 do
+            for j = 1, self.cols, 1 do
+                res[i][j] = self[i][j] + mat[i][j]
+            end
+        end
+        return res    
+    end
+    
+    -- Multiplies two matrices
+    function Matrix:multiply(mat)
+        -- Checks on matrix alignment 
+        if self.cols ~= mat.lines then
+            error("Attempted to multiply misaligned matrices!")
+            return 0
+        end
+    
+        -- Result has n of the first and m of the second
+        local res = Matrix:new(self.lines, mat.cols)
+        for i = 1, res.lines, 1 do
+            for j = 1, res.cols, 1 do
+                res[i][j] = tableDot(self:line(i), mat:col(j))
+            end
+        end
+        return res
+    end
+    
+    -- Inverts a matrix
+    function Matrix:invert()
+        -- Check if it's square
+        if self.lines ~= self.cols then
+            error("Matrix is not square, it cannot be inverted!")
+            return nil
+        end
+        -- Inverse matrix starts as the identity
+        local inverse = Matrix:identity(self.lines)
+        local mat = self:copy()
+        -- Performing Gauss-Jordan elimination
+        for c = 1, mat.cols, 1 do
+            -- Check if the matrix can be inverted
+            if mat[c][c] == 0 then
+                error("Matrix is singular, it cannot be inverted!")
+                return nil
+            end
+            -- For all lines of this column except the diagonal
+            for l = 1, mat.lines, 1 do
+                if l == c then continue end   -- Ignore diagonal
+                local coef = mat[l][c] / mat[c][c]
+                mat[l]      = tableAdd(mat[l],      tableMult(mat[c], -coef))
+                inverse[l]  = tableAdd(inverse[l],  tableMult(inverse[c], -coef))
+            end
+            -- Normalize the line
+            inverse[c]  = tableMult(inverse[c], 1/mat[c][c])
+            mat[c]      = tableMult(mat[c],     1/mat[c][c])
+        end
+        return inverse
+    end 
+end
+
+return Matrix
+
