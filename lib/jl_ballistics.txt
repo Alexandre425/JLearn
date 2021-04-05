@@ -65,9 +65,39 @@ do
                 ret[i] = {pos, cur_time}
                 i = i+1
             end
-            
         end
+        return ret
+    end
+    
+    -- Simulates indirect fire by calculating the bullet's flight and saving points near the same plane
+    -- ang - angle (pitch) at which the bullet is shot
+    -- range - range of altitude to save points (from z = [-range, range])
+    -- points - number of points to save (equally spaced in the range)
+    function BData:SimIndirectFire(ang, range, points)
+        if ang < 0 or points < 1 or range < 0 then return end
+    
+        local pos = Vector(0,0,0)
+        local cur_time = 0
+        local vel = Vector(math.cos(math.rad(ang)), 0, math.sin(math.rad(ang))):getNormalized() * self.muzzle_vel
+        local save_inc = -2*range / points
+        local next_save = range
+        local ret = {}
+        local i = 1
         
+        while vel[3] > 0 or pos[3] > -range do
+            local vel_len = vel:getLength()
+            local drag = vel * vel_len * self.drag_coef
+            
+            pos = pos + vel * delta_t
+            vel = vel + (gravity - drag)*delta_t
+            
+            cur_time = cur_time + delta_t
+            if vel[3] < 0 and pos[3] < next_save then   -- If falling and passed a saving point
+                next_save = next_save + save_inc
+                ret[i] = {pos, cur_time}
+                i = i+1
+            end
+        end
         return ret
     end
     

@@ -131,6 +131,28 @@ do
         print("\n")
     end
     
+    function Matrix:printSci(precision)
+        -- Find the largest absolute number
+        local length = 8 + (precision or 3)
+        -- Print the column numbering
+        local col_format = "%" .. string.format("%dd | ", length)
+        local col_str = {"   | "}
+        for i = 1, self.cols, 1 do
+            col_str[i+1] = string.format(col_format, i)
+        end
+        print(table.concat(col_str))
+        local format = "%" .. string.format("%d.%de | ", length, precision or 3)
+        for i = 1, self.lines, 1 do
+            -- Print the line numbering
+            local str = {string.format("%2d | ", i)}
+            for j = 1, self.cols, 1 do
+                str[j+1] = string.format(format, self[i][j])
+            end
+            print(table.concat(str))
+        end
+        print("\n")
+    end
+    
     -- Fills the matrix with zeroes
     function Matrix:zero()
         for i = 1, self.lines, 1 do
