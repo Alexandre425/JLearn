@@ -1,0 +1,196 @@
+--@name Map Scanner and Artilery Controller
+--@author Jagger
+--@shared
+--@include JLearn/lib/png.txt
+
+if CLIENT then
+
+    local PNG_PATH = "arty_controller/" .. game.getMap() .. ".png"
+    local INF_PATH = "arty_controller/" .. game.getMap() .. ".txt"
+    local LOAD_PATH = "data/sf_filedata/" .. PNG_PATH
+    local MAP_MAT = nil
+
+    local MAP_SIZE = 512
+    local ALT_FLAT_THRESH = 128
+    local ALT_ANG_THRESH  = 256
+    local ALT_LINE_SPACING = 250
+
+    local Png = require("lib/png.txt")
+
+    local function scanMap ()
+
+        if file.exists(PNG_PATH) then
+            print("Map file exists, loading...")
+            return 1
+        end
+
+        local function filter (ent) return true end
+
+        local function mixColors (c1, c2, ratio)
+            return c1*(1-ratio) + c2*ratio
+        end
+
+        print("Scanning map...")
+
+        -- Get the top of the map
+        local t = nil
+        local spos = chip():getPos() + Vector(0,0,10)
+        while 1 do
+            t = trace.trace(spos, spos+Vector(0,0,50000), filter, MASK.NPCWORLDSTATIC)
+            if t.HitSky == false then
+                spos = t.HitPos + Vector(0,0,1000)
+            else
+                break
+            end
+        end
+        -- Get the edges
+        spos = t.HitPos + Vector(0,0,-10)
+        -- (-x, +y) edge
+        t = trace.trace(spos, spos+Vector(-50000,0,0), filter, MASK.NPCWORLDSTATIC)
+        spos = t.HitPos + Vector(10,0,0)
+        t = trace.trace(spos, spos+Vector(0,50000,0), filter, MASK.NPCWORLDSTATIC)
+        spos = t.HitPos + Vector(0,-10,0)
+        local top_left = spos
+        -- (+x, -y) edge
+        t = trace.trace(spos, spos+Vector(50000,0,0), filter, MASK.NPCWORLDSTATIC)
+        spos = t.HitPos + Vector(-10,0,0)
+        t = trace.trace(spos, spos+Vector(0,-50000,0), filter, MASK.NPCWORLDSTATIC)
+        spos = t.HitPos + Vector(0,10,0)
+        local bot_right = spos
+
+        local map_size = bot_right - top_left
+        local x_inc = map_size[1] / MAP_SIZE
+        local y_inc = map_size[2] / MAP_SIZE
+        local map = {}
+        local rgb = {}
+        -- Scan the map and fill the map table
+        for y = 0, MAP_SIZE-1, 1 do
+            for x = 0, MAP_SIZE-1, 1 do
+                spos = top_left + Vector(x_inc*x, y_inc*y, 0)
+                t = trace.trace(spos, spos+Vector(0,0,-50000), filter, MASK.NPCWORLDSTATIC)
+                local point = {}
+                local hit_pos = t.HitPos
+                point.altitude = hit_pos[3]
+                point.color = render.traceSurfaceColor(hit_pos + Vector(0,0,1), hit_pos + Vector(0,0,-1))
+
+                point.slope = t.HitNormal:dot(Vector(0,0,1))
+                point.water = (bit.band(trace.pointContents(t.HitPos), CONTENTS.WATER) ~= 0)
+                if point.water == true then
+                    t = trace.trace(spos, spos+Vector(0,0,-50000), filter, MASK.WATER)
+                    point.depth = t.HitPos[3] - point.altitude
+                end
+                map[MAP_SIZE*y + x + 1] = point
+
+                if quotaAverage() > quotaMax()*0.80 then coroutine.yield() end
+            end
+        end
+
+        print("Processing...")
+
+        -- Process the map table and generate the RGB table
+        local idx = 1
+        for y = 0, MAP_SIZE-1, 1 do
+            for x = 0, MAP_SIZE-1, 1 do
+                local point = map[MAP_SIZE*y + x + 1]
+                -- Get all neighbors
+                local neighbors = {}
+                if y ~= MAP_SIZE-1 then
+                    table.insert(neighbors, map[MAP_SIZE*(y+1) + (x) + 1])
+                end
+                if x ~= 0 then
+                    table.insert(neighbors, map[MAP_SIZE*(y-1) + (x) + 1])
+                end
+                if x ~= MAP_SIZE-1 then
+                    table.insert(neighbors, map[MAP_SIZE*(y) + (x+1) + 1])
+                end
+                if x ~= 0 then
+                    table.insert(neighbors, map[MAP_SIZE*(y) + (x-1) + 1])
+                end
+                local alt_edge = false
+                local alt_line = false
+                -- For all neighbors, determine if altitude line should be drawn
+                for k, v in ipairs(neighbors) do
+                    if not v then continue end
+                    local alt_diff = point.altitude - v.altitude
+                    if alt_diff > 0 then
+                        if (alt_diff > ALT_ANG_THRESH and point.slope > 0.4) or (point.slope > 0.9 and alt_diff > ALT_FLAT_THRESH) then
+                            alt_edge = true
+                        elseif math.floor(point.altitude / ALT_LINE_SPACING) ~= math.floor(v.altitude / ALT_LINE_SPACING) then
+                            alt_line = true
+                        end
+                    end
+                end
+                local color = map[MAP_SIZE*y + x + 1].color
+                if point.water then
+                    if alt_line then
+                        color = mixColors(color, Color(0, 229, 255), 0.6)
+                    else
+                        local mix = math.min(1, 0.6 + point.depth / 500)
+                        color = mixColors(color, Color(19, 76, 168), mix)
+                    end
+                elseif alt_edge     then color = mixColors(color, Color(255, 114, 48), 0.9)
+                elseif alt_line     then color = mixColors(color, Color(255, 196, 0), 0.7) end
+                rgb[idx]   = math.round(color[1])
+                rgb[idx+1] = math.round(color[2])
+                rgb[idx+2] = math.round(color[3])
+                idx = idx + 3
+
+                if quotaAverage() > quotaMax()*0.80 then coroutine.yield() end
+            end
+        end
+
+        print("Writing...")
+
+        -- Ready the image for writing
+        local img = Png(MAP_SIZE,MAP_SIZE)
+        local block_size = MAP_SIZE
+        -- Generate the PNG
+        for i = 1, MAP_SIZE * MAP_SIZE * 3, block_size do
+            local pixels = {unpack(rgb, i, i+block_size-1)}
+            img:write(pixels)
+            if quotaAverage() > quotaMax()*0.80 then coroutine.yield() end
+        end
+        -- Write the file
+        file.createDir("arty_controller")
+        file.open(PNG_PATH, "w")
+        local image_data = img.output
+        block_size = 1024*3
+        for i = 1, #image_data, block_size do
+            local max_idx = math.min(#image_data, i+block_size-1)
+            local stream = table.concat({unpack(image_data, i, max_idx)})
+            file.append(PNG_PATH, stream)
+            if quotaAverage() > quotaMax()*0.80 then coroutine.yield() end
+        end
+
+        print("Done!")
+
+        return 1
+    end
+
+    render.createRenderTarget("myrendertarget")
+    local function renderMap ()
+        local cur_x, cur_y = render.cursorPos(player())
+        --render.setColor(Color(255, 255, 255, 255))
+        render.setMaterial(MAP_MAT)
+        render.drawTexturedRect(0,0,512,512)
+        render.setColor(Color(255, 0, 0, 100))
+        render.drawCircle(cur_x or 0, cur_y or 0, 10)
+    end
+
+    local scanMapRoutine = coroutine.wrap(scanMap)
+
+    hook.add("think", "scan_map", function()
+        if not scanMapRoutine() then
+            return
+        else
+            MAP_MAT = material.createFromImage(LOAD_PATH, "nocull smooth")
+            hook.add("render", "", renderMap)
+            hook.remove("think", "scan_map")
+        end
+    end)
+
+end
+
+if SERVER then
+
+end
