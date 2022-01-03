@@ -5,7 +5,7 @@
 local delta_t = 0.015
 local gravity = Vector(0,0,-600)
 
-local BData = class("matrix")
+local BData = class("jl_ballistics")
 do
     -- Creates a new bullet data object
     function BData:initialize(ent)
@@ -13,7 +13,7 @@ do
         self.drag_coef = ent and ent:acfDragCoef() or 0
         return self
     end
-    
+
     -- Converts the bullet data to a table
     function BData:toTable()
         local tab = {}
@@ -21,7 +21,7 @@ do
         tab.drag_coef = self.drag_coef
         return tab
     end
-    
+
     -- Creates a BData object from a table
     -- Table is trusted, so should only be used with toTable
     function BData:fromTable(tab)
@@ -30,7 +30,7 @@ do
         bdata.drag_coef = tab.drag_coef
         return bdata
     end
-    
+
     -- Prints a bullet data object
     function BData:print()
         local str = ""
@@ -38,28 +38,30 @@ do
         str = str .. string.format("Drag coefficient: %.3e\n", self.drag_coef)
         print(str)
     end
-    
+
     -- Simulates a direct fire by calculating the bullet's flight and saving equally spaced points
     -- ang - angle (pitch) at which the bullet is shot
     -- time - time to stop the solve
     -- points - number of points to save (equally spaced between 0 and time)
-    function BData:SimDirectFire(ang, time, points)
+    function BData:simDirectFire(ang, time, points)
         local pos = Vector(0,0,0)
         local cur_time = 0
         local vel = Vector(math.cos(math.rad(ang)), 0, math.sin(math.rad(ang))):getNormalized() * self.muzzle_vel
-        local save_inc = time / points
-        local next_save = 0
+        local save_inc = time / (points + 1)
+        local next_save = save_inc
         local ret = {}
         local i = 1
         
         while cur_time < time do
             local vel_len = vel:getLength()
             local drag = vel * vel_len * self.drag_coef
-            
-            pos = pos + vel * delta_t
-            vel = vel + (gravity - drag)*delta_t
-            
+            local d_v = (gravity - drag) * delta_t
+            local d_p = (vel + 0.5 * d_v) * delta_t
+
+            pos = pos + d_p
+            vel = vel + d_v
             cur_time = cur_time + delta_t
+			
             if cur_time > next_save then
                 next_save = next_save + save_inc
                 ret[i] = {pos, cur_time}
@@ -69,13 +71,68 @@ do
         return ret
     end
     
+    --- Simulates a direct fire and inserts the data points in a lookup table
+    -- @param ang The firing angle (pitch)
+    -- @param time The time to simulate for
+    -- @param LUT The lookup table to insert the data into
+    -- @param pos_transform The function to transform the position into an index
+    function BData:simDirectFireLUT(ang, time, lut, pos_transform)
+        local pos = Vector(0,0,0)
+        local cur_time = 0
+        local ang = math.rad(ang)
+        local vel = Vector(math.cos(ang), 0, math.sin(ang)):getNormalized() * self.muzzle_vel
+        local z_comp = 0
+        local i = 1
+        
+        while cur_time < time do
+            local vel_len = vel:getLength()
+            local drag = vel * vel_len * self.drag_coef
+            local d_v = (gravity - drag) * delta_t
+            local d_p = (vel + 0.5 * d_v) * delta_t
+
+            pos = pos + d_p
+            vel = vel + d_v
+            cur_time = cur_time + delta_t
+
+            z_comp = pos[1] * math.tan(ang) - pos[3]
+            lut:insert(pos_transform(pos), {cur_time, z_comp})
+        end
+    end
+
+    --- Generates a direct fire dataset with the given parameters. Coroutine this, it can take long!
+    -- @param min_ang The minimum angle included in the dataset
+    -- @param max_ang The maximum angle included in the dataset
+    -- @param max_time The amount of time the bullet is simulated for
+    -- @param model_func The function with the regression model. Should take two parameters, target angle and distance
+    function BData:directFireDataset(min_ang, max_ang, max_time, model_func)
+        local dataset = {}
+        dataset.i = 1
+        dataset.X = {}
+        dataset.Y = {}
+        -- For 5 degree increments
+        for ang = min_ang, max_ang, 5 do
+            local points = self:simDirectFire(ang, max_time, 10)
+            -- Process the data points
+            for k,v in ipairs(points) do
+                local pos = v[1]
+                local time = v[2]
+                local z_comp = pos[1] * math.tan(math.rad(ang)) - pos[3]
+                dataset.X[dataset.i] = model_func({pos})
+                dataset.Y[dataset.i] = {time, z_comp}
+                dataset.i = dataset.i + 1
+            end
+            if quotaAverage() > quotaMax() * 0.75 then coroutine.yield() end
+        end
+        return dataset
+    end
+
     -- Simulates indirect fire by calculating the bullet's flight and saving points near the same plane
     -- ang - angle (pitch) at which the bullet is shot
     -- range - range of altitude to save points (from z = [-range, range])
     -- points - number of points to save (equally spaced in the range)
-    function BData:SimIndirectFire(ang, range, points)
+    function BData:simIndirectFire(ang, range, points)
         if ang < 0 or points < 1 or range < 0 then return end
-    
+
         local pos = Vector(0,0,0)
         local cur_time = 0
         local vel = Vector(math.cos(math.rad(ang)), 0, math.sin(math.rad(ang))):getNormalized() * self.muzzle_vel
@@ -83,15 +140,17 @@ do
         local next_save = range
         local ret = {}
         local i = 1
-        
+
         while vel[3] > 0 or pos[3] > -range do
             local vel_len = vel:getLength()
             local drag = vel * vel_len * self.drag_coef
-            
-            pos = pos + vel * delta_t
-            vel = vel + (gravity - drag)*delta_t
-            
+            local d_v = (gravity - drag) * delta_t
+            local d_p = (vel + 0.5 * d_v) * delta_t
+
+            pos = pos + d_p
+            vel = vel + d_v
             cur_time = cur_time + delta_t
+			
             if vel[3] < 0 and pos[3] < next_save then   -- If falling and passed a saving point
                 next_save = next_save + save_inc
                 ret[i] = {pos, cur_time}
@@ -100,7 +159,7 @@ do
         end
         return ret
     end
-    
+
 end
 
 return BData
