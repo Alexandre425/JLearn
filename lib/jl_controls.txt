@@ -1,0 +1,113 @@
+--@name Controller
+--@author Jagger
+--@shared
+
+local Controls = class("jl_controls")
+do
+    if SERVER then
+        local seat = nil
+        local driver = nil
+        local callbacks = {}
+        local keys = {}
+        
+        -- Initializes the server side
+        -- Needs the seat entity
+        function Controls.initialize(_seat)
+            seat = _seat
+            
+            hook.add("PlayerEnteredVehicle", "jlctrl_enter", function (ply, s)
+                if s == seat then
+                    driver = ply
+                    -- Turn the player's client on
+                    net.start("jlctrl_driver_on")
+                    net.send(ply)
+                end
+            end)
+            
+            hook.add("PlayerLeaveVehicle", "jlctrl_leave", function (ply, s)
+                if s == seat then
+                    driver = nil
+                    -- Turn the player's client off
+                    net.start("jlctrl_driver_off")
+                    net.send(ply)
+                end
+            end)
+            
+            net.receive("jlctrl_keys", function (len, ply)
+                if ply ~= driver then return end
+            
+                local read = net.readUInt(7)
+                while read ~= KEY.NONE do
+                    keys[read] = 1
+                    if callbacks[read] then callbacks[read](1) end
+                    read = net.readUInt(7)
+                end
+                read = net.readUInt(7)
+                while read ~= KEY.NONE do
+                    keys[read] = 0
+                    if callbacks[read] then callbacks[read](0) end
+                    read = net.readUInt(7)
+                end
+                
+            end)
+        end
+        
+        -- Registers a callback function to be ran when the key is pressed or released
+        -- Should be func(pressed), where pressed is 1 or 0
+        function Controls.register_callback(key, func)
+            callbacks[key] = func
+        end
+        
+        -- Returns the keys table to index (or modify, but pls dont)
+        function Controls.get_keys()
+            return keys
+        end
+        
+    elseif CLIENT then
+        local driving = false
+        local buffer = {pressed = {}, released = {}}
+        
+        net.receive("jlctrl_driver_on", function()
+            driving = true
+        end)
+        
+        net.receive("jlctrl_driver_off", function()
+            driving = false
+        end)
+        
+        hook.add("inputPressed", "jlctrl_key_pressed", function (key)
+            if not driving then return end
+            
+            table.insert(buffer.pressed, key)
+        end)
+        
+        hook.add("inputReleased", "jlctrl_key_released", function (key)
+            if not driving then return end
+            
+            table.insert(buffer.released, key)
+        end)
+        
+        hook.add("think", "jlctrl_send_keys", function ()
+            if not driving then return end
+            if #buffer.pressed == 0 and #buffer.released == 0 then return end
+            
+            net.start("jlctrl_keys")
+                for i = 1, #buffer.pressed do
+                    net.writeUInt(buffer.pressed[i], 7)
+                end
+                net.writeUInt(KEY.NONE, 7) -- Separator
+                for i = 1, #buffer.released do
+                    net.writeUInt(buffer.released[i], 7)
+                end
+                net.writeUInt(KEY.NONE, 7)
+            net.send()
+            
+            table.empty(buffer.pressed)
+            table.empty(buffer.released)
+        end)
+        
+    end
+
+end
+
+return Controls

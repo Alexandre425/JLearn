@@ -1,0 +1,290 @@
+--@name JLearn Modular Turret
+--@author Jagger
+--@shared
+--@includedir JLearn/lib
+
+------------------
+-- INSTRUCTIONS --
+------------------
+--- BUILDING
+-- Make sure your turret ring prop has it's front facing forward
+
+--- WIRING
+-- Wire the base, turret ring and seat how you would expect
+-- The aimer is the prop to which your weapons should be parented
+-- If you only have one main weapon, you can wire the aimer to it
+-- You can also use the aimer to customize the pivot point of your main weapon
+-- Wire the generated WEP inputs to the respective weapons
+
+--- CONFIGURING
+-- Change the values below to change turret behavior
+
+-------------------
+-- CONFIGURATION --
+-------------------
+-- The modules to include. Make sure they are included with a call to require()
+MODULES = {JTLC = JTLC}
+-- Turret turn rate in degrees per second
+TURN_RATE = 25
+-- Turret stabilizer max turn rate
+TURN_STAB = 120
+-- Aimer elevation rate in degrees per second
+ELEVATION_RATE = 45
+-- Elevation stabilizer max turn rate
+ELEVATION_STAB = 45
+-- Aimer pitch restrictions
+PITCH_LIMIT = {-5, 20}
+-- Wether or not the main weapons should staggered fire
+MAIN_WEP_STAGGER = true
+-- Wether or not the secondary weapons should staggered fire
+SEC_WEP_STAGGER = true
+-- Camera offset
+CAM_OFFSET = Vector(0, 0, 50)
+CAM_DIST = 120
+-- Zoom controls
+MIN_FOV = 100
+MAX_ZOOM = 20
+ZOOM_SPEED = 1.5 -- Relative to current zoom, so [1, +inf]
+-- Mouse sens
+SENSITIVITY = 0.03
+
+
+if SERVER then
+
+-- Filter is the array of entities to filter out when running traces to determine aimpos
+wire.adjustInputs(
+    {"Base",   "Aimer",  "Ring",   "Seat", "Primaries", "Secondaries", "Filter"},
+    {"entity", "entity", "entity", "entity", "array", "array", "array"}
+)
+
+local ents = {}
+local holos = {}
+local last_think = nil
+local cam_ang = Angle()
+
+local function relu(a)
+    return a > 0 and a or 0
+end
+
+local function angClamp(a, min, max)
+    local f = math.clamp
+    return  Angle(f(a[1],min[1],max[1]), f(a[2],min[2],max[2]), f(a[3],min[3],max[3]))
+end
+
+local count = 0
+local function every30(func)
+    count = count + 1
+    
+    if count >= 30 then
+        count = 0
+        func()
+    end
+end
+
+local last_think = timer.curtime()
+local function main()
+    local curr_time = timer.curtime()
+    local delta_t = curr_time - (last_think or curr_time)
+    last_think = curr_time
+    
+    if ents.base and holos.ring and holos.aimer then
+        local pitch = 0 
+        local yaw = 0
+        
+        if ents.driver then
+            local cam_pos = holos.ring:localToWorld(CAM_OFFSET)
+            local zv = Vector()
+            local hit_pos = trace.traceHull(cam_pos, cam_pos + cam_ang:getForward() * 64000, zv, zv, {}, MASK.SHOT_PORTAL, COLLISION_GROUP.NONE, false).HitPos
+            
+            local target_ang = ents.base:worldToLocalAngles((hit_pos - holos.aimer:getPos()):getAngle())
+            local curr_ang = ents.base:worldToLocalAngles(holos.aimer:getAngles())
+            
+            -- Angular velocity local to the gun
+            local ang_vel = ents.base:getAngleVelocity()
+            local ang_vel_y = ang_vel[3]
+            local ang_vel_p = ents.base:worldToLocalVector(holos.ring:getRight()):dot(ang_vel)
+            
+            -- Add the stabilizer rotation to the regular elev and turn rates
+            -- pitch
+            local min_diff, max_diff, delta_ang
+            min_diff = -delta_t * (ELEVATION_RATE + math.min(relu(ang_vel_p), ELEVATION_STAB))
+            max_diff = delta_t * (ELEVATION_RATE + math.min(relu(-ang_vel_p), ELEVATION_STAB))
+            delta_ang = math.clamp(math.angleDifference(target_ang[1], curr_ang[1]), min_diff, max_diff)
+            pitch = math.clamp(curr_ang[1] + delta_ang, -PITCH_LIMIT[2], -PITCH_LIMIT[1])
+            -- yaw
+            min_diff = -delta_t * (TURN_RATE + math.min(relu(ang_vel_y), TURN_STAB))
+            max_diff = delta_t * (TURN_RATE + math.min(relu(-ang_vel_y), TURN_STAB))
+            delta_ang = math.clamp(math.angleDifference(target_ang[2], curr_ang[2]), min_diff, max_diff)
+            yaw = curr_ang[2] + delta_ang
+            
+            every30(function ()
+            end)
+        end
+        
+        
+        holos.ring:setAngles(ents.base:localToWorldAngles(Angle(0, yaw, 0)))
+        holos.aimer:setAngles(holos.ring:localToWorldAngles(Angle(pitch, 0, 0)))
+    end
+end
+
+local function driverUpdate(ply, seat)
+    if seat == ents.seat then
+        ents.driver = ply
+        -- Turn the player's client on
+        net.start("driver_on")
+        net.send(ply)
+    end
+end
+hook.add("PlayerEnteredVehicle", "driverUpdate", driverUpdate)
+
+local function driverReset(ply, seat)
+    if seat == ents.seat then
+        ents.driver = nil
+        -- Turn the player's client off
+        net.start("driver_off")
+        net.send(ply)
+    end
+end
+hook.add("PlayerLeaveVehicle", "driverReset", driverReset)
+
+local function init()
+    ents.aimer = wire.ports.Aimer
+    ents.ring  = wire.ports.Ring
+    ents.base  = wire.ports.Base
+    ents.seat  = wire.ports.Seat
+    
+    for k,v in pairs(ents) do
+        if not isValid(v) then
+            error("One of the entities is not wired! Wire it and restart the chip")
+        end
+    end
+    
+    -- Undo previous parents
+    ents.aimer:unparent()
+    ents.ring:unparent()
+    
+    -- Create the holos
+    local angles = ents.base:getAngles()
+    holos.aimer = holograms.create(ents.aimer:getPos(), angles, "models/holograms/cube.mdl")
+    holos.ring  = holograms.create(ents.ring:getPos(), angles, "models/holograms/cube.mdl")
+    
+    -- Parent everything
+    holos.ring:setParent(ents.base)   -- Parent the ring holo to the base
+    ents.ring:setParent(holos.ring)   -- The ring to the ring holo
+    holos.aimer:setParent(holos.ring) -- The aimer holo to the ring holo
+    ents.aimer:setParent(holos.aimer) -- And the aimer to the aimer holo
+    
+    -- Network the entities to the client
+    net.receive("req_ents", function(len, ply)
+        net.start("ents")
+            net.writeEntity(holos.ring)
+            net.writeEntity(ents.ring)
+        net.send(ply)
+    end)
+    
+    -- Network the camera angle
+    net.receive("cam_ang", function(len, ply)
+        cam_ang = net.readAngle()
+    end)
+end
+
+-- Wait for module initialization to finish
+local function waitForModuleInit()
+    -- Wait for module initialization
+    -- Initialize the modules
+    init()
+    
+    for k,v in pairs(MODULES) do
+        v:init()
+    end
+    hook.remove("think", "waitForModuleInit")
+    hook.add("think", "main", main)
+end
+hook.add("think", "waitForModuleInit", waitForModuleInit)
+
+end
+
+if CLIENT then
+
+local driving = false
+
+local zoom = 1
+local fov = MIN_FOV / zoom
+local sensitivity = SENSITIVITY * fov / MIN_FOV
+local cam_ang = Angle()
+local ents = {}
+local holos = {}
+
+-- Request the entities
+net.start("req_ents")
+net.send()
+
+net.receive("ents", function(len)
+    net.readEntity(function (ent) holos.ring = ent end)
+    net.readEntity(function (ent) ents.ring = ent end)
+end)
+
+net.receive("driver_on", function(len)
+    driving = true
+end)
+
+net.receive("driver_off", function(len)
+    driving = false
+end)
+
+hook.add('mousemoved', 'aim', function(x, y)
+    if not driving then return end
+    
+    cam_ang.pitch = math.clamp(cam_ang.pitch + y * sensitivity, -89, 89)
+    cam_ang.yaw   = cam_ang.yaw - x * sensitivity
+    
+    net.start("cam_ang")
+        net.writeAngle(cam_ang)
+    net.send()
+end)
+
+hook.add('mouseWheeled', 'zoom_ctrl', function(delta)
+    if not driving then return end
+    
+    local nz = delta > 0 and zoom * ZOOM_SPEED or zoom / ZOOM_SPEED
+    zoom = math.clamp(nz, 1, MAX_ZOOM)
+    fov = MIN_FOV / zoom
+    sensitivity = SENSITIVITY * fov / MIN_FOV
+end)
+
+hook.add("calcview", "view", function(pos, ang, _fov, znear, zfar)
+    if not driving then return end
+    
+    if holos.ring and holos.ring:isValid() then
+        pos = holos.ring:localToWorld(CAM_OFFSET) - CAM_DIST * cam_ang:getForward()
+    end
+    
+    return {origin = pos, angles = cam_ang, fov = fov}
+end)
+
+-- HUD stuff
+hook.add("drawhud", "", function()
+    if not driving then return end
+    
+    local w, h = render.getGameResolution()
+    local c = {w / 2, h / 2}
+    local p = {0, 0}
+    
+    -- Aim reticle
+    render.setRGBA(255, 255, 255, 255)
+    render.drawCircle(c[1], c[2], 8)
+    render.drawRect(c[1]-1, c[2]-1, 2, 2)
+    render.setRGBA(0, 0, 0, 255)
+    render.drawCircle(c[1], c[2], 9)
+        
+    
+end)
+
+end
+
+
+
+
+
+
+

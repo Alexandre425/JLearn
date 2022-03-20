@@ -155,25 +155,6 @@ elseif SERVER then
     local X = Matrix:fromTable({formatInput(0,0)})
     local last_think = timer.curtime()
 
-    -- Simplified low pass filter
-    local function lowPassFilter(old_val, new_val, coef)
-        return (1-coef)*old_val + coef*new_val
-    end
-
-    -- Determine the target's position offset after a certain time considering its velocity and localized acceleration
-    local function calcTargetOffset(time, vel, accel)
-        local offset = Vector(0,0,0)
-        if time <= 0 then return Vector(0) end
-        while time > 0 do
-            time = time - 0.1
-            local delta_t = time > 0 and 0.1 or -time
-            local delta_v, _ = localToWorld(accel, Angle(0), Vector(0,0,0), vel:getAngle())
-            vel = vel + delta_v * delta_t
-            offset = offset + vel * delta_t
-        end
-        return offset
-    end
-
     -- Perform a regression
     local function predict(to_target)
         -- Pitch to the target

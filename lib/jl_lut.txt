@@ -1,0 +1,156 @@
+--@name JLearn Lookup Table Library
+--@author Jagger
+--@shared
+--@includedir JLearn/lib
+
+local BData = require("JLearn/lib/jl_ballistics.txt")
+
+local LUT = class("jl_lut")
+do
+    --- Creates a lookup table with the given stride per dimension.
+    -- @param stride Table containing the lookup stride of each dimension
+    function LUT:initialize(stride)
+        self.stride = table.copy(stride)
+        self.depth = #stride
+        self.lut = {}
+        
+        return self
+    end
+    
+    --- Returns the sum of squared errors of the index.
+    -- The higher the return value, the worse the index is
+    -- @param index Table containing the indexes in order
+    -- @returns The sum of squared errors of the idexes with the stride
+    function LUT:indexSSE(index)
+        local sse = 0
+        for i = 1, self.depth, 1 do
+            local stride = self.stride[i]
+            sse = sse + ((index[i] % stride) / stride)^2
+        end
+        return sse
+    end
+    
+    --- Inserts a data point in the LUT.
+    -- @param index Table containing the indexes in order
+    -- @param data The data to inser
+    function LUT:insert(index, data)
+        if type(data) ~= "table" then data = {data} end
+        
+        -- Do not insert data point if it has worse allignment than an existing one
+        local old_sse = self:getSSE(index)
+        local new_sse = self:indexSSE(index)
+        if old_sse and old_sse < new_sse then return end
+        
+        data = {data, new_sse}
+        local tbl = self.lut
+        for i = 1, self.depth, 1 do
+            local dim_i = math.round(index[i] / self.stride[i])
+            
+            if i == self.depth then -- If last dimension, insert data
+                tbl[dim_i] = data   
+            else                    -- Otherwise index
+                -- Initialize the next dimension if it hasn't yet been
+                if not tbl[dim_i] then tbl[dim_i] = {} end
+                tbl = tbl[dim_i]    
+            end
+        end
+        
+    end
+    
+    
+    function LUT:rawGet(index)
+        local tbl = self.lut
+        for i = 1, self.depth, 1 do
+            local dim_i = math.round(index[i] / self.stride[i])
+            
+            if i == self.depth then -- If last dimension, return the data
+                return tbl[dim_i] 
+            else                    -- Otherwise index
+                if not tbl[dim_i] then return nil end
+                tbl = tbl[dim_i]    
+            end
+        end
+    end
+    
+    --- Gets a data point from the LUT.
+    -- @param index Table containing the indexes in order
+    -- @return The data at the index
+    function LUT:get(index)
+        local got = self:rawGet(index)
+        return got and got[1] or nil
+    end
+    
+    --- Gets a SSE from a data point on the LUT.
+    -- @param index Table containing the indexes in order
+    -- @return The SSE of the data point
+    function LUT:getSSE(index)
+        local got = self:rawGet(index)
+        return got and got[2] or nil
+    end
+    
+    --- Recursively indexes and interpolates between the two nearest indexes
+    function LUT:recursiveIndexAndInterpolate(tbl, index, depth, round_func)
+        local stride = self.stride[depth]
+        local indexed = tbl[round_func(index[depth] / stride)]
+        if not indexed then return nil end
+        -- If at the maximum depth, simply return the value
+        if depth == self.depth then return indexed[1] end
+        -- Otherwise index the next dimension
+        tbl = indexed
+        
+        local itp1 = self:recursiveIndexAndInterpolate(tbl, index, depth + 1, math.floor)
+        local itp2 = self:recursiveIndexAndInterpolate(tbl, index, depth + 1, math.ceil)
+        if not itp1 or not itp2 then return nil end
+        
+        -- Interpolation factor
+        local factor = (index[depth] % stride) / stride
+        -- itp1 * (1-factor) + itp2 * factor
+        return jl_matrix_tableAdd(jl_matrix_tableMult(itp1, (1-factor)), jl_matrix_tableMult(itp2, factor))
+    end
+    
+    --- Gets the interpolation between the datapoints nearest to the index.
+    -- @param index Table containing the indexes in order
+    -- @return The interpolated data for the index
+    function LUT:interpolate(index)
+        local stride = self.stride[1]
+        local itp1 = self:recursiveIndexAndInterpolate(self.lut, index, 1, math.floor)
+        local itp2 = self:recursiveIndexAndInterpolate(self.lut, index, 1, math.ceil)
+        if not itp1 or not itp2 then return nil end
+        local factor = (index[1] % stride) / stride
+        -- itp1 * (1-factor) + itp2 * factor
+        return jl_matrix_tableAdd(jl_matrix_tableMult(itp1, (1-factor)), jl_matrix_tableMult(itp2, factor))
+    end
+    
+    function LUT.directFireIndexer(pos)
+        local h = math.sqrt(pos[1]^2 + pos[2]^2)
+        local v = pos[3]
+        return {h, v}
+    end
+    
+    --- Creates a direct fire LUT. Should be coroutined.
+    -- Only the crate parameter is mandatory. If the other parameters aren't passed, it will generate
+    -- a simple, low elevation LUT
+    -- @param crate The ammo crate
+    -- @param min_ang The minimum angle included in the dataset
+    -- @param max_ang The maximum angle included in the dataset
+    -- @param max_time The amount of time the bullet is simulated for
+    function LUT.directFireLUT(crate, min_ang, max_ang, max_time)
+        bdata = BData:new(crate)
+        min_ang = math.clamp(min_ang or -10, -90, 90)
+        max_ang = math.clamp(max_ang or 20, -90, 90)
+        max_time = math.clamp(max_time or 3, 0.15, 2 * 32768 / bdata.muzzle_vel)
+        
+        -- Create the LUT
+        local stride = bdata.muzzle_vel * 0.015 * 4 -- Approx. how much a bullet moves in 4 ticks
+        local lut = LUT:new({stride, stride}) -- Has a depth of 2, horizontal and vertical distances
+        -- Generate dataset
+        for ang = min_ang, max_ang, 1 do
+            bdata:simDirectFireLUT(ang, max_time, lut, LUT.directFireIndexer)
+            if quotaAverage() > quotaMax() * 0.75 then coroutine.yield() end
+        end
+
+        return lut
+    end
+end
+
+return LUT

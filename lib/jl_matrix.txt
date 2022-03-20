@@ -5,54 +5,56 @@
 -- Calculates the dot product between two tables
 local function tableDot(tab1, tab2)
     local sum = 0
-    for i, v in ipairs(tab1) do 
+    for i, v in ipairs(tab1) do
         sum = sum + (tab1[i] or 0) * (tab2[i] or 0)
     end
     return sum
 end
 
 -- Adds the values in two tables one by one
-local function tableAdd (tab1, tab2)
+local function tableAdd(tab1, tab2)
     local res = {}
-    for i, v in ipairs(tab1) do 
+    for i, v in ipairs(tab1) do
         res[i] = v + tab2[i]
     end
     return res
 end
+jl_matrix_tableAdd = tableAdd
 
 -- Multiplies a table by a coefficient
-local function tableMult (tab, coef)
+local function tableMult(tab, coef)
     local res = {}
-    for i, v in ipairs(tab) do 
+    for i, v in ipairs(tab) do
         res[i] = v * coef
     end
     return res
 end
+jl_matrix_tableMult = tableMult
 
-local Matrix = class("matrix")
+local Matrix = class("jl_matrix")
 do
     -- Matrix constructor
     function Matrix:initialize(n, m)
         self.lines = n
         self.cols = m
         self.count = m*n
-        
+
         for i = 1, self.lines, 1 do
             self[i] = {}
         end
         return self
     end
-    
+
     -- Copies a table
     function Matrix:copy()
         local mat = Matrix:new(self.lines, self.cols)
-        
+
         for i = 1, self.lines, 1 do
             mat[i] = table.copy(self[i])
         end
         return mat
     end
-    
+
     -- Reads a table and makes a matrix from it
     function Matrix:fromTable(tab)
         local mat = nil
@@ -73,10 +75,10 @@ do
                 mat[1][c] = v
             end
         end
-        
+
         return mat
-    end    
-    
+    end
+
     -- Converts the matrix to a table
     function Matrix:toTable()
         local tab = {}
@@ -85,7 +87,7 @@ do
         end
         return tab
     end
-    
+
     -- Finds the maximum value of a matrix
     function Matrix:max()
         local max = -1e999
@@ -96,7 +98,7 @@ do
         end
         return max
     end
-    
+
     -- Finds the minimum value of a matrix
     function Matrix:min()
         local min = 1e999
@@ -108,6 +110,10 @@ do
         return min
     end
     
+    function Matrix:debug()
+        print(string.format("%d lines by %d columns matrix", self.lines, self.cols))
+    end
+
     function Matrix:print(precision)
         -- Find the largest absolute number
         local max = math.max(math.abs(self:max()), math.abs(self:min()))
@@ -130,7 +136,7 @@ do
         end
         print("\n")
     end
-    
+
     function Matrix:printSci(precision)
         -- Find the largest absolute number
         local length = 8 + (precision or 3)
@@ -152,7 +158,7 @@ do
         end
         print("\n")
     end
-    
+
     -- Fills the matrix with zeroes
     function Matrix:zero()
         for i = 1, self.lines, 1 do
@@ -162,7 +168,7 @@ do
         end
         return self
     end
-    
+
     -- Fills the matrix with random numbers
     function Matrix:random(min, max)
         for i = 1, self.lines, 1 do
@@ -172,7 +178,7 @@ do
         end
         return self
     end
-    
+
     -- Creates an identity matrix
     function Matrix:identity(dim)
         local mat = Matrix:initialize(dim, dim)
@@ -182,13 +188,13 @@ do
         end
         return mat
     end
-    
+
     -- Returns the line
     function Matrix:line(i)
         local line = table.copy(self[i])
         return line
     end
-    
+
     -- Returns the column
     function Matrix:col(j)
         local col = {}
@@ -197,7 +203,7 @@ do
         end
         return col
     end
-    
+
     -- Returns the transpose of a matrix
     function Matrix:transpose()
         local mat = Matrix:new(self.cols, self.lines)
@@ -206,7 +212,7 @@ do
         end
         return mat
     end
-    
+
     -- Adds two matrices
     function Matrix:add(mat)
         -- Checks if the sizes match
@@ -214,24 +220,24 @@ do
             error("Attempted to add different size matrices!")
             return 0
         end
-        
+
         local res = Matrix:new(self.lines, self.cols)
         for i = 1, self.lines, 1 do
             for j = 1, self.cols, 1 do
                 res[i][j] = self[i][j] + mat[i][j]
             end
         end
-        return res    
+        return res
     end
-    
+
     -- Multiplies two matrices
     function Matrix:multiply(mat)
-        -- Checks on matrix alignment 
+        -- Checks on matrix alignment
         if self.cols ~= mat.lines then
             error("Attempted to multiply misaligned matrices!")
             return 0
         end
-    
+
         -- Result has n of the first and m of the second
         local res = Matrix:new(self.lines, mat.cols)
         for i = 1, res.lines, 1 do
@@ -241,7 +247,7 @@ do
         end
         return res
     end
-    
+
     -- Inverts a matrix
     function Matrix:invert()
         -- Check if it's square
@@ -271,7 +277,7 @@ do
             mat[c]      = tableMult(mat[c],     1/mat[c][c])
         end
         return inverse
-    end 
+    end
 end
 
 return Matrix

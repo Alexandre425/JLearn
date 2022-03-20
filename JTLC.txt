@@ -1,371 +1,219 @@
 --@name JTLS - JLearn Target Leading Computer
 --@author Jagger
---@shared
---@include JLearn/lib/jl_matrix.txt
---@include JLearn/lib/jl_ballistics.txt
+--@server
+--@includedir JLearn/lib
 
 local Matrix = require("JLearn/lib/jl_matrix.txt")
 local BData = require("JLearn/lib/jl_ballistics.txt")
+local Reg = require("JLearn/lib/jl_regression.txt")
 
-    ---------------
-    -- CONSTANTS --
-    ---------------
-if CLIENT then
-    -- Maximum time to generate bullet data. Set this low (3s or so) for best results, or don't set it at all to use the default value, nil (recommended)
-    -- It is also very recommended that you use a projectile with a muzzle velocity of 400 m/s or higher, as the model will have a hard time aproximating otherwise
-    -- Just don't use a fucking low velocity howitzer and try to simulate it for 5s and it should be fine
-    MAX_SIM_TIME = nil
-else
-    -- Aproximate distance offset after the target to detonate the round, helps with getting more direct hits
-    FUZE_OFFSET = 50
-    -- Acceleration filtering coefficient. The smaller it is, the lower the frequencies it filters are.
-    -- Minimum is 0 for max filtering (don't, it filters ALL of it out), maximum is 1 for no filtering
-    -- In layman's terms -> set low to ignore jitteriness of targets, set high for fast responsiveness
-    KD_ACCEL = 0.15
-    -- Aimpoint relative position filtering coefficient
-    -- Same as above. Higher values mean higher responsiveness, but more jittery aiming.
-    KD_AIMPOINT = 0.05
-    -- Time to keep tracking a target after sight has been lost
-    TRACK_TIME = 5
+---------------
+-- CONSTANTS --
+---------------
+-- Maximum time to generate bullet data. Set this low (3s or so) for best results, or don't set it at all to use the default value, nil (recommended)
+-- It is also very recommended that you use a projectile with a muzzle velocity of 400 m/s or higher, as the model will have a hard time aproximating otherwise
+-- Just don't use a lmao low velocity howitzer and try to simulate it for 5s and it should be fine
+MAX_SIM_TIME = nil
+-- Aproximate distance offset (in meters) after the target to detonate the round, helps with getting more direct hits
+FUZE_OFFSET = 2
+-- Acceleration filtering coefficient. The smaller it is, the lower the frequencies it filters are.
+-- Minimum is 0 for max filtering (don't, it filters ALL of it out), maximum is 1 for no filtering
+-- In layman's terms -> set low to ignore jitteriness of targets, set high for fast responsiveness
+KD_ACCEL = 0.15
+-- Aimpoint relative position filtering coefficient
+-- Same as above. Higher values mean higher responsiveness, but more jittery aiming.
+KD_AIMPOINT = 0.05
+-- Time to keep tracking a target after sight has been lost
+TRACK_TIME = 3
+
+wire.adjustInputs(
+    {"Active", "Ammo_crate", "Radar", "Target_ID", "Base", "Gun", "Target"},
+    {"number", "entity", "wirelink", "number", "entity", "entity", "entity"}
+)
+wire.adjustOutputs({"Aimpos", "Fuze", "Tracking"}, {"vector", "number", "number"})
+
+-- Server variables
+local reg_model = nil
+local last_think = timer.curtime()
+local old_dist = 0
+local target_pos = Vector(0,0,0)
+local target_vel = Vector(0,0,0)
+local old_vel = Vector(0,0,0)
+local target_accel = Vector(0,0,0)
+local radar_idx = 0
+local final_offset = Vector(0)
+local rel_offset = Vector(0)
+local guessing_time = 0
+local tracking = 0
+
+-- Simplified low pass filter
+local function lowPassFilter(old_val, new_val, coef)
+    return (1-coef)*old_val + coef*new_val
 end
 
--- Formats the model's input for both training and prediction
-local function formatInput(a1, d2)
-    ----------------------
-    -- REGRESSION MODEL --
-    ----------------------
-    -- Here you should design a series of operations that relate the input variables with the output variables.
-    -- It can be anything you want, but a good aproach is a polynomial component for each of the inputs
-    --  and also some components that correlate them (if the inputs aren't fully independent).
-    -- Having a constant (1) component is also pretty important, and helps you gauge how correctly the model predicts,
-    --  as a high coefficient for the constant indicates a poorly fit model
-    -- The model below is extremely robust, I don't believe it needs improving, but you can try playing with it if you want
-    local d1 = math.sqrt(d2)
-    local d3 = d1^3
-    local a2 = a1^2
-
-    return {1, a1, a2, d1, d2, d3, a1*d1, a1*d2, a2*d1}
+-- Determine the target's position offset after a certain time considering its velocity and localized acceleration
+local function calcTargetOffset(time, vel, accel)
+    local offset = Vector(0,0,0)
+    if time <= 0 then return Vector(0) end
+    while time > 0 do
+        time = time - 0.1
+        local delta_t = time > 0 and 0.1 or -time
+        local delta_v, _ = localToWorld(accel, Angle(0), Vector(0,0,0), vel:getAngle())
+        vel = vel + delta_v * delta_t
+        offset = offset + vel * delta_t
+    end
+    return offset
 end
 
-if CLIENT then
-    local bdata = nil
-
-    local function generateDataset()
-        print("[Dataset] ", Color(200,200,0), "Generating...")
-        local time = MAX_SIM_TIME or 2*32768 / bdata.muzzle_vel    -- Time to cover 2 maps worth of distance (consider diagonals and slowdown)
-        local dataset = {}
-        dataset.i = 1
-        dataset.X = {}
-        dataset.Y = {}
-        -- For 10 degree increments
-        for ang = -20, 90, 5 do
-            local points = bdata:SimDirectFire(ang, time, 20)
-            -- Process the data points
-            for k,v in ipairs(points) do
-                local time = v[2]
-                local z_comp = v[1][1]*math.tan(math.rad(ang)) - v[1][3]
-                dataset.X[dataset.i] = formatInput(ang, v[1]:getLengthSqr())
-                dataset.Y[dataset.i] = {time, z_comp}
-                dataset.i = dataset.i + 1
-            end
-            if quotaAverage() > quotaMax()*0.75 then coroutine.yield() end
-        end
-        print("[Dataset] ", Color(0,200,0), "Completed!")
-
-        return dataset
+-- Main loop: get target info, predict
+local function main()
+    if wire.ports.Active == 0 then
+        wire.ports.Fuze = 0
+        return
     end
 
-    local function fit()
-        print("[Fit] ", Color(200,200,0), "Fitting...")
-        local dataset_corout = coroutine.create(generateDataset)
-        local dataset = nil
-        -- Generate the dataset
-        while not dataset do
-            dataset = coroutine.resume(dataset_corout)
-            coroutine.yield()
-        end
+    local base = wire.ports.Base
+    if not isValid(base) then return end
 
-        -- Generate the matrixes from the dataset
-        local X = Matrix:fromTable(dataset.X)
-        local Y = Matrix:fromTable(dataset.Y)
-        -- Perform a regression, minimizing the sum of squared errors through the normal equation
-        local X_T = X:transpose()
-        local coefs = (X_T:multiply(X)):invert():multiply(X_T:multiply(Y))
-        print("[Fit] ", Color(0,200,0), "Completed!")
-        print("[Fit] ", Color(0,200,0), "Coeficients:")
-        coefs:print(16)
-
-        -- To ensure tick limit is not exceeded for high dataset sizes
-        coroutine.yield()
-
-        print("[Evaluation] ", Color(200,200,0), "Evaluating...")
-
-        -- Predict on the training data
-        local Y_pred = X:multiply(coefs)
-        local avg_err_t, avg_err_z = 0, 0
-        -- For every prediction
-        for i = 1, Y_pred.lines, 1 do
-            -- Calculate the absolute errors
-            avg_err_t = avg_err_t + math.abs(Y_pred[i][1] - Y[i][1])
-            avg_err_z = avg_err_z + math.abs(Y_pred[i][2] - Y[i][2])
-        end
-        -- Calculate their average
-        avg_err_t = avg_err_t / Y_pred.lines
-        avg_err_z = avg_err_z / Y_pred.lines
-
-        print("[Evaluation] ", Color(0,200,0), "Average absolute error:")
-        print(string.format("Time:         %10.3f", avg_err_t))
-        print(string.format("Compensation: %10.3f", avg_err_z))
-
-        if avg_err_t > 0.05 or avg_err_z > 150 then
-            print("[Evaluation] ", Color(255,0,0), "WARNING!",  Color(255,150,0)," Large average error! Increase the muzzle velocity or decrease simulation time for best results!")
-        else
-            print("[Evaluation] ", Color(0,200,0), "Completed! (Good results)")
-        end
-        print("\n[Tip] ", Color(0,200,0), "Open the console for better readability!\n")
-
-        return coefs
-    end
-    local fit_corout = coroutine.create(fit)
-
-    local function main()
-        -- Generate the coeficients
-        coefs = coroutine.resume(fit_corout)
-        if not coefs then return end
-
-        -- Encode the table in JSON and compress for sending
-        local enc = json.encode(coefs:toTable())
-        net.start("coef")
-        net.writeStream(enc, true)
-        net.send()
-        hook.remove("think", "main")
-    end
-
-    -- When receiving the bullet data from the server
-    net.receive("bdata", function()
-        net.readStream(function(contents)
-            local tab = json.decode(contents)
-            bdata = BData:fromTable(tab)
-            hook.add("think", "main", main)
-        end)
-    end)
-
-elseif SERVER then
-    wire.adjustInputs(
-        {"Active", "Ammo_crate", "Radar", "Target_ID", "Base", "Gun", "Target"},
-        {"number", "entity", "wirelink", "number", "entity", "entity", "entity"}
-    )
-    wire.adjustOutputs({"Aimpos", "Fuze", "Tracking"}, {"vector", "number", "number"})
-
-    -- Server variables
-    local beta = nil
-    local X = Matrix:fromTable({formatInput(0,0)})
-    local last_think = timer.curtime()
-    local old_dist = 0
-    local target_pos = Vector(0,0,0)
-    local target_vel = Vector(0,0,0)
-    local old_vel = Vector(0,0,0)
-    local target_accel = Vector(0,0,0)
-    local radar_idx = 0
-    local final_offset = Vector(0)
-    local rel_offset = Vector(0)
-    local guessing_time = 0
-    local tracking = 0
-
-    -- Simplified low pass filter
-    local function lowPassFilter(old_val, new_val, coef)
-        return (1-coef)*old_val + coef*new_val
-    end
-
-    -- Determine the target's position offset after a certain time considering its velocity and localized acceleration
-    local function calcTargetOffset(time, vel, accel)
-        local offset = Vector(0,0,0)
-        if time <= 0 then return Vector(0) end
-        while time > 0 do
-            time = time - 0.1
-            local delta_t = time > 0 and 0.1 or -time
-            local delta_v, _ = localToWorld(accel, Angle(0), Vector(0,0,0), vel:getAngle())
-            vel = vel + delta_v * delta_t
-            offset = offset + vel * delta_t
-        end
-        return offset
-    end
-
-    -- Perform a regression
-    local function predict(to_target)
-        -- Pitch to the target
-        local ang = math.deg(math.atan(to_target[3] / math.sqrt(to_target[1]^2 + to_target[2]^2)))
-        local dist2 = to_target:getLengthSqr()
-        -- Generate the input data matrix
-        X[1] = formatInput(ang, dist2)
-        -- Predict
-        local Y = X:multiply(beta)
-        return Y[1][1], Y[1][2]
-    end
-
-    -- Main loop: get target info, predict
-    local function main()
-        if wire.ports.Active == 0 then
-            wire.ports.Fuze = 0
-            return
-        end
-
-        local base = wire.ports.Base
-        if not isValid(base) then return end
-
-        -- Time since last think
-        local delta_t = timer.curtime() - last_think
-        last_think = timer.curtime()
-
-        if wire.ports.Target and isValid(wire.ports.Target) then    -- If entity tracking (very illegal!!!)
-            local ent = wire.ports.Target
-            target_pos = ent:getPos()
-            local new_vel = ent:getVelocity()
-            local new_accel = worldToLocal((target_vel - old_vel)/0.1, Angle(0,0,0), Vector(0,0,0), old_vel:getAngle())
-            target_accel = lowPassFilter(target_accel, new_accel, KD_ACCEL_TRACK)
-            target_vel = new_vel
-        else                                                        -- otherwise, fallback to radar
-            local radar = wire.ports.Radar
-            if not isValid(radar) then return end
-            local target_id = wire.ports.Target_ID
-            if target_id ~= 0 then                                  -- If a target ID is supplied
-                if radar.IDs[radar_idx] ~= target_id then           -- If index is outdated
-                    local found = 0
-                    for i, v in ipairs(radar.IDs) do                -- Update the index (search)
-                        if v == target_id then                      -- If target is found
-                            radar_idx = i
-                            found = 1
-                            break
-                        end
-                    end
-                    if found == 0 then return end
+    -- Time since last think
+    local delta_t = timer.curtime() - last_think
+    last_think = timer.curtime()
+                                                   -- otherwise, fallback to radar
+    local radar = wire.ports.Radar
+    if not isValid(radar) then return end
+    local target_id = wire.ports.Target_ID
+    if target_id ~= 0 then                                  -- If a target ID is supplied
+        if radar.IDs[radar_idx] ~= target_id then           -- If index is outdated
+            local found = 0
+            for i, v in ipairs(radar.IDs) do                -- Update the index (search)
+                if v == target_id then                      -- If target is found
+                    radar_idx = i
+                    found = 1
+                    break
                 end
-            else
-                radar_idx = 1                                       -- Use index 1 if not specified
             end
-
-            if radar.Position[radar_idx] and old_dist ~= radar.Distance[radar_idx] then   -- New value: radar updated
-                old_dist   = radar.Distance[radar_idx]
-                target_pos = radar.Position[radar_idx]
-                old_vel    = target_vel
-                target_vel = radar.Velocity[radar_idx]
-                -- Localize and filter the acceleration
-                local new_accel = worldToLocal((target_vel - old_vel)/0.1, Angle(0,0,0), Vector(0,0,0), old_vel:getAngle())
-                target_accel = lowPassFilter(target_accel, new_accel, KD_ACCEL)
-                local world_accel, _ = localToWorld(target_accel, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
-                target_vel = target_vel + world_accel*delta_t
-                target_pos = target_pos + target_vel*delta_t
-                guessing_time = 0
-            end
-            if guessing_time < TRACK_TIME then
-                guessing_time = guessing_time + delta_t
-                tracking = 1
-            else
-                tracking = 0
-            end
-            wire.ports.Tracking = tracking
+            if found == 0 then return end
         end
+    else
+        radar_idx = 1                                       -- Use index 1 if not specified
+    end
 
-        if tracking == 1 then
-            local world_accel, _ = localToWorld(target_accel, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
-            -- Only count acceleration if the target is being tracked properly
-            if guessing_time < 0.5 then target_vel = target_vel + world_accel*delta_t end
-            target_pos = target_pos + target_vel*delta_t
+    if radar.Position[radar_idx] and old_dist ~= radar.Distance[radar_idx] then   -- New value: radar updated
+        old_dist   = radar.Distance[radar_idx]
+        target_pos = radar.Position[radar_idx]
+        old_vel    = target_vel
+        target_vel = radar.Velocity[radar_idx]
+        -- Localize and filter the acceleration
+        local new_accel = worldToLocal((target_vel - old_vel)/0.1, Angle(0,0,0), Vector(0,0,0), old_vel:getAngle())
+        target_accel = lowPassFilter(target_accel, new_accel, KD_ACCEL)
+        local world_accel, _ = localToWorld(target_accel, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
+        target_vel = target_vel + world_accel*delta_t
+        target_pos = target_pos + target_vel*delta_t
+        guessing_time = 0
+    end
+    if guessing_time < TRACK_TIME then
+        guessing_time = guessing_time + delta_t
+        tracking = 1
+    else
+        tracking = 0
+    end
+    wire.ports.Tracking = tracking
+
+    if tracking == 1 then
+        local world_accel, _ = localToWorld(target_accel, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
+        -- Only count acceleration if the target is being tracked properly
+        if guessing_time < 0.5 then target_vel = target_vel + world_accel*delta_t end
+        target_pos = target_pos + target_vel*delta_t
+    else
+        wire.ports.Fuze = 0
+        return
+    end
+
+    -- Get the reference position (the gun's muzzle, the reference entity, or in last case the base)
+    local ref_pos = nil
+    local gun = wire.ports.Gun
+    if isValid(gun) then
+        local muzzle_pos, _ = gun:getAttachment(1)
+        if muzzle_pos then
+            ref_pos = muzzle_pos
         else
-            wire.ports.Fuze = 0
-            return
+            ref_pos = gun:getPos()
         end
+    else
+        ref_pos = base:getPos()
+    end
 
-        -- Get the reference position (the gun's muzzle, the reference entity, or in last case the base)
-        local ref_pos = nil
-        local gun = wire.ports.Gun
-        if isValid(gun) then
-            local muzzle_pos, _ = gun:getAttachment(1)
-            if muzzle_pos then
-                ref_pos = muzzle_pos
-            else
-                ref_pos = gun:getPos()
-            end
-        else
-            ref_pos = base:getPos()
-        end
+    local to_target_orig = target_pos - ref_pos
+    local to_target = to_target_orig
+    local new_vel = target_vel
+    local time, z_comp = 0, 0
+    local offset = Vector(0,0,0)
+    local offset_tab = {}
+    local step_size_sqr = 0
 
-        local to_target_orig = target_pos - ref_pos
-        local to_target = to_target_orig
-        local new_vel = target_vel
-        local time, z_comp = 0
-        local offset = Vector(0,0,0)
-        local offset_tab = {}
-        local step_size_sqr = 0
-        -- Iterate N times
+    -- Iterate N times
+    for i = 1, 4, 1 do
+        -- Predict firing on the target position
+        local pred = reg_model:predict({to_target})
+        time, z_comp = pred[1], pred[2]
+        -- Update future target position with the velocity
+        local old_offset = offset
+        offset = calcTargetOffset(time, target_vel, target_accel)
+        to_target = to_target_orig + offset
+        step_size_sqr = (offset-old_offset):getLengthSqr()
+        if step_size_sqr < 25 then break end
+    end
+    -- If a good aproximation was not achieved
+    if step_size_sqr >= 25 then
+        -- Aproximate a few iterations more with filtering
         for i = 1, 4, 1 do
-            -- Predict firing on the target position
-            time, z_comp = predict(to_target)
-            -- Update future target position with the velocity
-            local old_offset = offset
-            offset = calcTargetOffset(time, target_vel, target_accel)
+            local pred = reg_model:predict({to_target})
+            time, z_comp = pred[1], pred[2]
+            local new_offset = calcTargetOffset(time, target_vel, target_accel)
+            offset = lowPassFilter(offset, new_offset, 0.3)
             to_target = to_target_orig + offset
-            step_size_sqr = (offset-old_offset):getLengthSqr()
+            step_size_sqr = (offset-new_offset):getLengthSqr()
             if step_size_sqr < 25 then break end
         end
-        -- If a good aproximation was not achieved
-        if step_size_sqr >= 25 then
-            -- Aproximate a few iterations more with filtering
-            for i = 1, 4, 1 do
-                time, z_comp = predict(to_target)
-                local new_offset = calcTargetOffset(time, target_vel, target_accel)
-                offset = lowPassFilter(offset, new_offset, 0.3)
-                to_target = to_target_orig + offset
-                step_size_sqr = (offset-new_offset):getLengthSqr()
-                if step_size_sqr < 25 then break end
-            end
-        end
-
-        -- Filter the offset localized to the target's velocity
-        local new_rel_offset = worldToLocal(offset, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
-        rel_offset = lowPassFilter(rel_offset, new_rel_offset, KD_AIMPOINT)
-        local final_offset = localToWorld(rel_offset, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle()) + Vector(0, 0, z_comp)
-        to_target = to_target_orig + final_offset
-
-        wire.ports.Aimpos = ref_pos + to_target
-        wire.ports.Fuze = time
     end
 
-    local printed_warning = 0
+    -- Filter the offset localized to the target's velocity
+    local new_rel_offset = worldToLocal(offset, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle())
+    rel_offset = lowPassFilter(rel_offset, new_rel_offset, KD_AIMPOINT)
+    local final_offset = localToWorld(rel_offset, Angle(0,0,0), Vector(0,0,0), target_vel:getAngle()) + Vector(0, 0, z_comp)
+    to_target = to_target_orig + final_offset
 
-    -- Wait for ammo to be valid, send data to client
-    -- Delay is needed due to some network fuckery (client wouldn't receive the message otherwise)
-    timer.create("wait_to_send", 0.5, 1, function()
-        hook.add("think", "wait_ammo", function()
-            if not wire.ports.Ammo_crate:isValid() then
-                if not printed_warning then
-                    print("[Ammo] ", Color(200,200,0), "Waiting for ammo to be wired...")
-                    printed_warning = 1
-                end
-                return
-            end
-
-            local bdata = BData:new(wire.ports.Ammo_crate)
-            local enc = json.encode(bdata:toTable())
-            net.start("bdata")
-            net.writeStream(enc, true)
-            net.send()
-            hook.remove("think", "wait_ammo")
-            -- Update the fuze offset (translate it to time)
-            FUZE_OFFSET = FUZE_OFFSET / bdata.muzzle_vel
-            -- Generating a different filter coefficient for entity tracking
-            KD_ACCEL_TRACK = KD_ACCEL * 0.015 / 0.1
-        end)
-    end)
-
-    -- Wait for client response with the coeficients
-    net.receive("coef", function()
-        net.readStream(function(contents)
-            local tab = json.decode(contents)
-            beta = Matrix:fromTable(tab)
-            hook.add("think", "main", main)
-        end)
-    end)
+    wire.ports.Aimpos = ref_pos + to_target
+    wire.ports.Fuze = time
 end
+
+local model_corout = coroutine.wrap(Reg.directFireModel)
+local function waitForModel()
+    reg_model = model_corout(crate, -10, 90, MAX_SIM_TIME)
+    if not reg_model then return end
+    
+    hook.remove("think", "waitForModel")
+    hook.add("think", "main", main)
+end
+
+local printed_warning = 0
+crate = nil
+-- Wait for ammo to be valid and create the model
+local function waitForAmmo()
+    if not wire.ports.Ammo_crate:isValid() then
+        if not printed_warning then
+            print("[Ammo] ", Color(200,200,0), "Waiting for ammo to be wired...")
+            printed_warning = 1
+        end
+        return
+    end
+
+    crate = wire.ports.Ammo_crate
+    -- Update the fuze offset (translate it to time)
+    FUZE_OFFSET = FUZE_OFFSET / crate:acfMuzzleVel()
+    hook.remove("think", "waitForAmmo")
+    hook.add("think", "waitForModel", waitForModel)
+end
+hook.add("think", "waitForAmmo", waitForAmmo)
 
 

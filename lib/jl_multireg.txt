@@ -1,0 +1,33 @@
+--@name JLearn Multiple Regression Library
+--@author Jagger
+--@shared
+--@includedir JLearn/lib
+
+local Reg = require("JLearn/lib/jl_regression.txt")
+
+local MReg = class("jl_multireg")
+do
+    --- Creates a multiple regression object from the provided regression objects.
+    -- Uses the first model's output as the second's input, and so on
+    -- @param models Table containing the regression models in order
+    -- @param model_funcs Table containing the model functions in order
+    function MReg:initialize(models, model_funcs)
+        self.models = models
+        self.model_funcs = model_funcs
+        self.size = #models
+        
+        return self
+    end
+    
+    --- Makes a prediction on the input data.
+    -- @param X The input table with the model variables
+    -- @return A table with the prediction
+    function MReg:predict(X)
+        for i = 1, self.size, 1 do
+            X = self.model_funcs[i](X)
+            X = self.models[i]:predict(X)
+        end
+        return X
+    end
+end
+return MReg

@@ -1,0 +1,140 @@
+--@name JLearn Regression Library
+--@author Jagger
+--@shared
+--@includedir JLearn/lib
+
+local Matrix = require("JLearn/lib/jl_matrix.txt")
+local BData = require("JLearn/lib/jl_ballistics.txt")
+
+--- Calculates the average error for every output of a model
+-- @param y The target value
+-- @param yp The predicted value 
+local function averageError(y, yp)
+    local error = {}
+    local n_entries = #y
+    local n_outputs = #y[1]
+    -- Initialize the error
+    for i = 1, n_outputs, 1 do 
+        error[i] = 0 
+    end
+    -- Accumulate the absolute errors
+    for i = 1, n_entries, 1 do
+        for j = 1, n_outputs, 1 do
+        error[j] = error[j] + math.abs(y[i][j] - yp[i][j])
+        end
+    end
+    -- Average out the error
+    for i = 1, n_outputs, 1 do 
+        error[i] = error[i] / n_entries
+    end
+    
+    return error
+end
+
+local Regression = class("jl_regression")
+do
+    --- Creates a regression object by generating a coefficient matrix.
+    -- @param X The input table of the dataset (one sample per line)
+    -- @param Y The output table of the dataset (one result per line)
+    -- @param model_func The function with the regression model
+    function Regression:initialize(X, Y, model_func)
+        -- If inputs are classless, assume they're a table, otherwise they should be a jl_matrix
+        if not X.class then X = Matrix:fromTable(X) end
+        if not Y.class then Y = Matrix:fromTable(Y) end
+        
+        local X_t = X:transpose()
+        
+        self.coefs = (X_t:multiply(X)):invert():multiply(X_t:multiply(Y))
+        self.model_func = model_func
+        self.X = Matrix:fromTable(X[1])
+        
+        return self
+    end
+    
+    --- Makes a prediction on the input data.
+    -- @param X The input table with the model variables
+    -- @return A table with the prediction
+    function Regression:predict(X)
+        -- The table reference is copied directly for performance, but care must be taken not to feed it a bad table
+        -- Feed it nice things ok
+        self.X[1] = self.model_func(X)
+        return self.X:multiply(self.coefs)[1]
+    end
+    
+    --- The default model for direct fire
+    local function defaultDirectFireModelFunc(X)
+        local to_target = X[1]
+        -- Distance component
+        local d2 = to_target:getLengthSqr()
+        local d1 = math.sqrt(d2)
+        local d3 = d2 * d1
+        local d4 = d2 * d2
+        -- Vertical distance component
+        local v1 = to_target[3]
+        local v2 = v1 * v1
+        
+        return {1, d1, d2, d3, v1, v2, d1*v1, d2*v1, v2*d1}
+    end
+        
+    --- Creates a direct fire regression model. Should be coroutined.
+    -- Only the crate parameter is mandatory. If the other parameters aren't passed, it will generate
+    -- a simple, low elevation model with the default model function (which is quite robust).
+    -- @param crate The ammo crate
+    -- @param min_ang The minimum angle included in the dataset
+    -- @param max_ang The maximum angle included in the dataset
+    -- @param max_time The amount of time the bullet is simulated for
+    -- @param model_func The function with the regression model. Should take two parameters, target angle and distance
+    function Regression.directFireModel(crate, min_ang, max_ang, max_time, model_func)
+        bdata = BData:new(crate)
+        min_ang = math.clamp(min_ang or -10, -90, 90)
+        max_ang = math.clamp(max_ang or 20, -90, 90)
+        max_time = math.clamp(max_time or 3, 0.15, 2 * 32768 / bdata.muzzle_vel)
+        model_func = model_func or defaultDirectFireModelFunc
+        
+        -- Generate dataset
+        local dataset = bdata:directFireDataset(min_ang, max_ang, max_time, model_func)
+        print("[Dataset] ", Color(0,200,0), "Completed!")
+        coroutine.yield()
+        
+        local X = Matrix:fromTable(dataset.X)
+        local Y = Matrix:fromTable(dataset.Y)
+        
+        -- Generate coefficient matrix
+        local model = Regression:new(X, Y, model_func)
+        print("[Fit] ", Color(0,200,0), "Completed!")
+        model.coefs:printSci(3)
+
+        coroutine.yield()
+        
+        -- Evaluate model performance
+        local Y_pred = X:multiply(model.coefs)
+        local avg_error = averageError(Y, Y_pred)
+        print("[Evaluation] ", Color(0,200,0), "Average absolute error:")
+        print(string.format("Time:         %10.3fs", avg_error[1]))
+        print(string.format("Compensation: %10.3fm", avg_error[2] / 39.37))
+        if avg_error[1] > 0.05 or avg_error[2] > 150 then
+            print("[Evaluation] ", Color(255,0,0), "WARNING!",  Color(255,150,0),
+                " Large average error! Increase the muzzle velocity or decrease simulation time for best results!")
+        else
+            print("[Evaluation] ", Color(0,200,0), "Completed! (Good results)")
+        end
+        print("\n[Tip] ", Color(0,200,0), "Open the console for better readability!\n")
+
+        return model
+    end
+    
+    --- The default model for indirect fire
+    local function defaultIndirectFireModelFunc(X)
+        local h1 = X[1]
+        local v1 = X[2]
+        local h2 = h1 * h1
+        local h3 = h2 * h1
+        local h4 = h2 * h2
+        local h5 = h4 * h1
+        local v2 = v1 * v1
+    
+        return {1, h1, h2, h3, h4, h5, h1*v1, h2*v1, h3*v1, h4*v1, h1*v2}
+    end
+end
+
+return Regression
